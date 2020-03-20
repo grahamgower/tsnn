@@ -1,0 +1,8 @@
+numpy
+nose
+h5py
+jsonschema
+svgwrite
+msprime
+kastore
+mock

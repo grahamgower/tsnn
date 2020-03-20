@@ -1,0 +1,105 @@
+version: 2
+jobs:
+  build:
+    docker:
+      - image: circleci/python:3.6-stretch
+    steps:
+      - checkout
+      - run:
+          name: Install dependencies and set path
+          command: |
+            pip install --user -r python/requirements/development.txt
+            sudo apt-get install ninja-build libcunit1-dev valgrind clang doxygen
+            # Install meson as root so we can install to the system below.
+            sudo pip install meson 
+            echo 'export PATH=/home/circleci/.local/bin:$PATH' >> $BASH_ENV
+      - run:
+          name: Compile Python
+          command: |
+            cd python 
+            CFLAGS="--coverage -Wall -Wextra -Werror -Wno-unused-parameter" \
+              python setup.py build_ext --inplace
+      - run:
+          name: Lint Python
+          command: |
+            cd python
+            flake8 --max-line-length 89 kastore setup.py tests
+      - run:
+          name: Run Python tests 
+          command: |
+            PYTHONPATH=python nosetests -v --with-coverage --cover-package kastore \
+              --cover-branches --cover-erase --cover-xml \
+              --cover-inclusive python/tests
+            python3 -m codecov -F python
+      - run:
+          name: Build Python package
+          command: |
+            cd python
+            rm -fR build
+            python setup.py sdist
+            python -m venv venv
+            source venv/bin/activate 
+            pip install --upgrade setuptools pip wheel
+            python setup.py build_ext
+            python setup.py egg_info
+            python setup.py bdist_wheel
+            pip wheel dist/*.tar.gz
+            pip install dist/*.tar.gz 
+      - run:
+          name: Compile C
+          command: |
+            # Build with coverage options
+            meson c/ build-gcc -D b_coverage=true 
+            ninja -C build-gcc
+      - run:
+          name: Run C tests
+          command: |
+            ./build-gcc/tests
+            ./build-gcc/cpp_tests
+            ./build-gcc/malloc_tests
+            ./build-gcc/io_tests
+      - run:
+          name: Run gcov & upload coverage.
+          command: |
+            gcov -pb -o ./python/build/temp.linux*/ python/_kastoremodule.c
+            gcov -pb ./build-gcc/tests@exe/kastore.c.gcno \
+              ./build-gcc/malloc_tests@exe/kastore.c.gcno \
+              ./build-gcc/io_tests@exe/kastore.c.gcno \
+              ./build-gcc/kastore@sha/kastore.c.gcno 
+            codecov -X gcov -F C
+      - run:
+          name: Valgrind for C tests.
+          command: |
+            valgrind --leak-check=full --error-exitcode=1 ./build-gcc/tests
+            valgrind --leak-check=full --error-exitcode=1 ./build-gcc/cpp_tests
+            valgrind --leak-check=full --error-exitcode=1 ./build-gcc/malloc_tests
+            valgrind --leak-check=full --error-exitcode=1 ./build-gcc/io_tests
+      - run:
+          name: Compile C tests under clang
+          command: |
+            CC=clang CXX=clang++ meson c/ build-clang 
+            ninja -C build-clang
+      - run:
+          name: Run clang C tests
+          command: |
+            ./build-clang/tests
+            ./build-clang/cpp_tests
+            ./build-clang/malloc_tests
+            ./build-clang/io_tests
+
+      - run:
+          name: Install shared library
+          command: |
+            meson build-install c --prefix=/usr
+            sudo ninja -C build-install install
+
+      - run:
+          name: Hand-compile a program.
+          command: |
+            g++ c/cpp_tests.cpp -o cpp_tests -lkastore
+            ./cpp_tests
+
+      - run:
+          name: Build docs
+          command: |
+            cd docs && make

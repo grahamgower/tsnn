@@ -1,0 +1,11 @@
+attrs
+codecov
+coverage
+flake8
+hypothesis
+humanize
+nose
+numpy
+mock
+breathe
+sphinx_rtd_theme

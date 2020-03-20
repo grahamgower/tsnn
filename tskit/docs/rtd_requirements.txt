@@ -1,0 +1,6 @@
+numpy
+svgwrite
+jsonschema
+h5py
+breathe
+sphinx-issues
