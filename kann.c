@@ -239,22 +239,21 @@ static int kann_class_error_core(const kann_t *ann, int *base)
 						(xk > 0.5 && tk < 0.5))
 						++n_err;
 					++(*base);
-					continue;
-				}
-
-				float t_sum = 0.0f, t_min = 1.0f, t_max = 0.0f, x_max = 0.0f, x_min = 1.0f;
-				int x_max_k = -1, t_max_k = -1;
-				for (k = 0; k < n; ++k) {
-					float xk = x->x[off+k], tk = t->x[off+k];
-					t_sum += tk;
-					t_min = t_min < tk? t_min : tk;
-					x_min = x_min < xk? x_min : xk;
-					if (t_max < tk) t_max = tk, t_max_k = k;
-					if (x_max < xk) x_max = xk, x_max_k = k;
-				}
-				if (t_sum - 1.0f == 0 && t_min >= 0.0f && x_min >= 0.0f && x_max <= 1.0f) {
-					++(*base);
-					n_err += (x_max_k != t_max_k);
+				} else {
+					float t_sum = 0.0f, t_min = 1.0f, t_max = 0.0f, x_max = 0.0f, x_min = 1.0f;
+					int x_max_k = -1, t_max_k = -1;
+					for (k = 0; k < n; ++k) {
+						float xk = x->x[off+k], tk = t->x[off+k];
+						t_sum += tk;
+						t_min = t_min < tk? t_min : tk;
+						x_min = x_min < xk? x_min : xk;
+						if (t_max < tk) t_max = tk, t_max_k = k;
+						if (x_max < xk) x_max = xk, x_max_k = k;
+					}
+					if (t_sum - 1.0f == 0 && t_min >= 0.0f && x_min >= 0.0f && x_max <= 1.0f) {
+						++(*base);
+						n_err += (x_max_k != t_max_k);
+					}
 				}
 			}
 		}

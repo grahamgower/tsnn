@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #include <glob.h>
 #include <errno.h>
 #include <sys/types.h>
@@ -10,6 +11,8 @@
 
 #include <tskit.h>
 #include "kann.h"
+
+static int verbose = 0;
 
 int
 ts_num_samples(const char *fn, tsk_table_collection_t *tables)
@@ -50,8 +53,8 @@ ts_load(const char *fn, tsk_table_collection_t *tables,
 	tsk_variant_t *variant;
 	int ret;
 	int tret;
-	int i, j;
-	int n_samples;
+	uint i, j;
+	uint n_samples;
 	double sequence_length;
 
 	if ((tret = tsk_table_collection_load(tables, fn, TSK_NO_INIT)) != 0) {
@@ -123,8 +126,8 @@ tsdir_load(const char *dir, float **_genotypes, int *_n_files,
 	float *genotypes;
 	int ret;
 	int tret;
-	int i;
-	int n_files;
+	uint i;
+	uint n_files;
 	int n_samples;
 
 	*_genotypes = NULL;
@@ -244,7 +247,8 @@ normalise(float **x, int n, int dim)
 			xx[j] *= std_inv;
 		}
 	}
-	printf("transforming data: mean=%f, stddev=%f\n", mean, 1/std_inv);
+	if (verbose)
+		printf("transforming data: mean=%f, stddev=%f\n", mean, 1/std_inv);
 }
 
 int
@@ -296,25 +300,98 @@ prepare_data(float *gts_a, float *gts_b, int n_files_a, int n_files_b, int in_di
 	return 0;
 }
 
-void
-kad_print_dot(FILE *fp, int n, kad_node_t **v)
+// Same as kann_train_fnn1(), but print training info as tab-separated columns.
+int kann_train_tsnn1(kann_t *ann, float lr, int mini_size, int max_epoch, int max_drop_streak, float frac_val, int n, float **_x, float **_y)
 {
-	int i, j;
-	for (i = 0; i < n; ++i) v[i]->tmp = i;
-	fprintf(fp, "digraph {\n");
-	for (i = n - 1; i >= 0; --i) {
-		kad_node_t *p = v[i];
-		if (p->op > 0) fprintf(fp, "\t%d [label=\"%s\"]\n", i, kad_op_name[p->op]);
-		for (j = 0; j < p->n_child; ++j)
-			fprintf(fp, "\t%d -> %d\n", p->child[j]->tmp, i);
-		if (p->pre) fprintf(fp, "\t%d -> %d [style=dotted,weight=0,constraint=false]\n", i, p->pre->tmp);
+	int i, j, *shuf, n_train, n_val, n_in, n_out, n_var, n_const, drop_streak = 0, min_set = 0;
+	float **x, **y, *x1, *y1, *r, min_val_cost = FLT_MAX, *min_x, *min_c;
+
+	n_in = kann_dim_in(ann);
+	n_out = kann_dim_out(ann);
+	if (n_in < 0 || n_out < 0) return -1;
+	n_var = kann_size_var(ann);
+	n_const = kann_size_const(ann);
+	r = (float*)calloc(n_var, sizeof(float));
+	shuf = (int*)malloc(n * sizeof(int));
+	x = (float**)malloc(n * sizeof(float*));
+	y = (float**)malloc(n * sizeof(float*));
+	kann_shuffle(n, shuf);
+	for (j = 0; j < n; ++j)
+		x[j] = _x[shuf[j]], y[j] = _y[shuf[j]];
+	n_val = (int)(n * frac_val);
+	n_train = n - n_val;
+	min_x = (float*)malloc(n_var * sizeof(float));
+	min_c = (float*)malloc(n_const * sizeof(float));
+
+	x1 = (float*)malloc(n_in  * mini_size * sizeof(float));
+	y1 = (float*)malloc(n_out * mini_size * sizeof(float));
+	kann_feed_bind(ann, KANN_F_IN,    0, &x1);
+	kann_feed_bind(ann, KANN_F_TRUTH, 0, &y1);
+
+	printf("epoch\ttraining_cost\ttraining_error\tvalidation_cost\tvalidation_error\n");
+
+	for (i = 0; i < max_epoch; ++i) {
+		int n_proc = 0, n_train_err = 0, n_val_err = 0, n_train_base = 0, n_val_base = 0;
+		double train_cost = 0.0, val_cost = 0.0;
+		kann_shuffle(n_train, shuf);
+		kann_switch(ann, 1);
+		while (n_proc < n_train) {
+			int b, c, ms = n_train - n_proc < mini_size? n_train - n_proc : mini_size;
+			for (b = 0; b < ms; ++b) {
+				memcpy(&x1[b*n_in],  x[shuf[n_proc+b]], n_in  * sizeof(float));
+				memcpy(&y1[b*n_out], y[shuf[n_proc+b]], n_out * sizeof(float));
+			}
+			kann_set_batch_size(ann, ms);
+			train_cost += kann_cost(ann, 0, 1) * ms;
+			c = kann_class_error(ann, &b);
+			n_train_err += c, n_train_base += b;
+			kann_RMSprop(n_var, lr, 0, 0.9f, ann->g, ann->x, r);
+			n_proc += ms;
+		}
+		train_cost /= n_train;
+		kann_switch(ann, 0);
+		n_proc = 0;
+		while (n_proc < n_val) {
+			int b, c, ms = n_val - n_proc < mini_size? n_val - n_proc : mini_size;
+			for (b = 0; b < ms; ++b) {
+				memcpy(&x1[b*n_in],  x[n_train+n_proc+b], n_in  * sizeof(float));
+				memcpy(&y1[b*n_out], y[n_train+n_proc+b], n_out * sizeof(float));
+			}
+			kann_set_batch_size(ann, ms);
+			val_cost += kann_cost(ann, 0, 0) * ms;
+			c = kann_class_error(ann, &b);
+			n_val_err += c, n_val_base += b;
+			n_proc += ms;
+		}
+		if (n_val > 0) val_cost /= n_val;
+		if (n_train_base && n_val_base && n_val > 0) {
+			printf("%d\t%g\t%g\t%g\t%g\n", i+1,
+					train_cost, ((float)n_train_err) / n_train,
+					val_cost, ((float)n_val_err) / n_val);
+		}
+		if (i >= max_drop_streak && n_val > 0) {
+			if (val_cost < min_val_cost) {
+				min_set = 1;
+				memcpy(min_x, ann->x, n_var * sizeof(float));
+				memcpy(min_c, ann->c, n_const * sizeof(float));
+				drop_streak = 0;
+				min_val_cost = (float)val_cost;
+			} else if (++drop_streak >= max_drop_streak)
+				break;
+		}
 	}
-	fprintf(fp, "}\n");
-	for (i = 0; i < n; ++i) v[i]->tmp = 0;
+	if (min_set) {
+		memcpy(ann->x, min_x, n_var * sizeof(float));
+		memcpy(ann->c, min_c, n_const * sizeof(float));
+	}
+
+	free(min_c); free(min_x); free(y1); free(x1); free(y); free(x); free(shuf); free(r);
+	return i;
 }
 
 kann_t *
-model_gen(int n_rows, int n_cols, int n_conv, int n_filt, int k_size, float dropout)
+model_gen(int n_rows, int n_cols, int n_conv2d, int n_conv1d, int n_filt,
+		int k_size, int stride, int fc_size, float dropout)
 {
 	kad_node_t *t;
 	int i;
@@ -324,9 +401,9 @@ model_gen(int n_rows, int n_cols, int n_conv, int n_filt, int k_size, float drop
 	 */
 	t = kad_feed(4, 1, 1, n_rows, n_cols), t->ext_flag += KANN_F_IN;
 
-	for (i=0; i<n_conv; i++) {
+	for (i=0; i<n_conv2d; i++) {
 		// `k_size`x1 kernel; 1x1 stride; 0x0 padding
-		t = kad_relu(kann_layer_conv2d(t, n_filt, k_size, 1, 1, 1, 0, 0));
+		t = kad_relu(kann_layer_conv2d(t, n_filt, k_size, 1, stride, 1, 0, 0));
 		if (dropout > 0)
 			t = kann_layer_dropout(t, dropout);
 	}
@@ -334,49 +411,131 @@ model_gen(int n_rows, int n_cols, int n_conv, int n_filt, int k_size, float drop
 	// combine haplotypes
 	t = kad_reduce_mean(t, 3);
 
-	for (i=0; i<n_conv; i++) {
-		t = kad_relu(kann_layer_conv1d(t, n_filt, k_size, 1, 0));
+	for (i=0; i<n_conv1d; i++) {
+		t = kad_relu(kann_layer_conv1d(t, n_filt, k_size, stride, 0));
 		if (dropout > 0)
 			t = kann_layer_dropout(t, dropout);
 	}
 
 	// combine loci
-	t = kad_reduce_mean(t, 2);
-	
-	t = kad_relu(kann_layer_dense(t, 16));
+	t = kad_relu(kann_layer_dense(t, fc_size));
+
+	if (dropout > 0)
+		t = kann_layer_dropout(t, dropout);
+
 	return kann_new(kann_layer_cost(t, 1, KANN_C_CEB), 0);
+}
+
+void
+usage(const char *argv0)
+{
+	fprintf(stderr, "usage: %s [...] tsdir1 tsdir2\n", argv0);
+	fprintf(stderr, "  -c INT     Number of conv2d layers [2].\n");
+	fprintf(stderr, "  -C INT     Number of conv1d layers [1].\n");
+	fprintf(stderr, "  -f INT     Number of filters per conv layer [16].\n");
+	fprintf(stderr, "  -k INT     Kernel size of each conv layer [8].\n");
+	fprintf(stderr, "  -S INT     Stride of each conv layer [2]\n");
+	fprintf(stderr, "  -F INT     Number of nodes in fully connected layer [4].\n");
+	fprintf(stderr, "  -d FLOAT   Dropout after conv and fc layers [0.2].\n");
+	//fprintf(stderr, "  -i FILE    Input model file [NULL]\n");
+	fprintf(stderr, "  -o FILE    Output model file [NULL]\n");
+	fprintf(stderr, "  -m INT     Max number of training epochs [NULL]\n");
+	fprintf(stderr, "  -r INT     Row length (haplotype squashing) [128]\n");
+	fprintf(stderr, "  -s INT     Seed for random number generator [31415]\n");
+	fprintf(stderr, "  -t INT     Number of threads to use [1]\n");
+	fprintf(stderr, "  -v         Increase verbosity\n");
+	exit(1);
 }
 
 int
 main(int argc, char **argv)
 {
-	const int verbose = 1;
+	kann_t *ann;
 	float *gts_a, *gts_b;
 	float *labels;
-	int n_files_a, n_files_b;
-	kann_t *ann;
 	float **x, **y;
-	const uint n_rows = 32; // n_sites dimension
+	char *fn_in = NULL, *fn_out = NULL;
+	char *dir_a, *dir_b;
+	int n_files_a, n_files_b;
+	int opt;
+	int seed = 31415;
+	uint n_rows = 128; // n_sites dimension
 	uint n_cols, n_cols2; // n_samples dimension
 
-	if (argc != 3) {
-		fprintf(stderr, "usage: %s tsdir1 tsdir2\n", argv[0]);
-		return 1;
+	// model params
+	int n_conv2d = 2;
+	int n_conv1d = 1;
+	int n_filt = 16;
+	int k_size = 8;
+	int stride = 2;
+	int fc_size = 4;
+	float dropout = 0.2f;
+
+	// training params
+	int n_threads = 1;
+	int mini_size = 64;
+	int max_epoch = 20;
+	int max_drop_streak = 10;
+	float lr = 0.001f;
+	float frac_val = 0.1f;
+
+	while ((opt = getopt(argc, argv, "c:C:f:F:k:d:i:o:m:r:s:S:t:v")) != -1) {
+		switch(opt) {
+			case 'c':
+				n_conv2d = atoi(optarg);
+				break;
+			case 'C':
+				n_conv1d = atoi(optarg);
+				break;
+			case 'f':
+				n_filt = atoi(optarg);
+				break;
+			case 'F':
+				fc_size = atoi(optarg);
+				break;
+			case 'k':
+				k_size = atoi(optarg);
+				break;
+			case 'd':
+				dropout = atof(optarg);
+				break;
+			// TODO: do something useful with input model
+			/*case 'i':
+				fn_in = optarg;
+				break;*/
+			case 'o':
+				fn_out = optarg;
+				break;
+			case 'm':
+				max_epoch = atoi(optarg);
+				break;
+			case 'r':
+				n_rows = atoi(optarg);
+				break;
+			case 's':
+				seed = atoi(optarg);
+				break;
+			case 'S':
+				stride = atoi(optarg);
+				break;
+			case 't':
+				n_threads = atoi(optarg);
+				break;
+			case 'v':
+				verbose++;
+				break;
+			default:
+				usage(argv[0]);
+				// NORETURN
+		}
 	}
 
-	{
-		// Verify that the model doesn't depend on the input image size.
-		kann_t *nn1, *nn2;
-		nn1 = model_gen(100, 100, 3, 16, 4, 0.3);
-		nn2 = model_gen(200, 200, 3, 16, 4, 0.3);
-		assert(kann_size_var(nn1) == kann_size_var(nn2));
-		assert(kann_size_const(nn1) == kann_size_const(nn2));
-		kann_delete(nn1);
-		kann_delete(nn2);
+	if (argc - optind != 2 || (fn_in && argc - optind != 1)) {
+		usage(argv[0]);
 	}
 
-	const char *dir_a = argv[1];
-	const char *dir_b = argv[2];
+	dir_a = argv[optind];
+	dir_b = argv[optind+1];
 
 	if (tsdir_load(dir_a, &gts_a, &n_files_a, n_rows, &n_cols) != 0)
 		return 2;
@@ -394,34 +553,29 @@ main(int argc, char **argv)
 		return 5;
 
 	kad_trap_fe();
-	kann_srand(31415);
-	ann = model_gen(n_rows, n_cols, 2, 12, 3, 0.3);
+	kann_srand(seed);
+	ann = model_gen(n_rows, n_cols, n_conv2d, n_conv1d, n_filt, k_size,
+			stride, fc_size, dropout);
 
-	const int n = n_files_a + n_files_b;
 	if (verbose) {
-		uint64_t cells = n * n_rows * n_cols;
-		printf("data: %.2f MiB across %d ts files\n",
-				cells * sizeof(float) / 1024.0 / 1024.0, n);
-		printf("model: %d variables\n", kann_size_var(ann));
-		printf("dim(in) = %d, dim(out) = %d\n",
+		uint64_t cells = (n_files_a + n_files_b) * n_rows * n_cols;
+		fprintf(stderr, "data: %.2f MiB across %d ts files\n",
+				cells * sizeof(float) / 1024.0 / 1024.0,
+				n_files_a + n_files_b);
+		fprintf(stderr, "model: %d variables\n", kann_size_var(ann));
+		fprintf(stderr, "dim(in) = %d, dim(out) = %d\n",
 				kann_dim_in(ann), kann_dim_out(ann));
-
-		kad_print_graph(stdout, ann->n, ann->v);
-		//kad_print_dot(stdout, ann->n, ann->v);
+		kad_print_graph(stderr, ann->n, ann->v);
 	}
 
-	const float lr = 0.01;
-	const int mini_size = 50;
-	const int max_epoch = 10;
-	const int max_drop_streak = 10;
-	const float frac_val = 0.1;
-	const int n_threads = 1;
+	if (n_threads > 1)
+		kann_mt(ann, n_threads, mini_size);
 
-	if (n_threads > 1) kann_mt(ann, n_threads, mini_size);
-	kann_train_fnn1(ann, lr, mini_size, max_epoch, max_drop_streak,
-			frac_val, n, x, y);
+	kann_train_tsnn1(ann, lr, mini_size, max_epoch, max_drop_streak,
+			frac_val, n_files_a + n_files_b, x, y);
 
-//	kann_save("blah", ann);
+	if (fn_out)
+		kann_save(fn_out, ann);
 	kann_delete(ann);
 
 	free(x);
