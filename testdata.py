@@ -12,7 +12,7 @@ def sim(rr, n_reps, seed):
 def dump(tslist, path):
     os.makedirs(path)
     for i, ts in enumerate(tslist):
-        ts.dump(f"{path}/{i}.ts")
+        ts.dump(f"{path}/{i}.trees")
 
 if __name__ == "__main__":
     n_reps = 5000

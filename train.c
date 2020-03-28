@@ -134,7 +134,7 @@ tsdir_load(const char *dir, float **_genotypes, int *_n_files,
 	*_n_files = 0;
 	*_n_cols = 0;
 
-	sprintf(pat, "%s/*", dir);
+	sprintf(pat, "%s/*.trees", dir);
 
 	switch (glob(pat, GLOB_NOSORT, _glob_err, &pglob)) {
 		case GLOB_NOSPACE:
@@ -182,23 +182,12 @@ tsdir_load(const char *dir, float **_genotypes, int *_n_files,
 		switch (ts_load(pglob.gl_pathv[i], &tables, m,
 					n_rows, n_samples)) {
 			case -1:
+			case 1:
 				ret = 1;
 				goto err2;
-			case 1:
-				continue;
 		}
 
 		n_files++;
-	}
-
-	if (n_files == 0) {
-		fprintf(stderr, "%s: no valid tskit files found.\n", dir);
-		ret = 1;
-		goto err2;
-	}
-
-	if (n_files < pglob.gl_pathc) {
-		// TODO: is it worth realloc'ing here?
 	}
 
 	*_genotypes = genotypes;
