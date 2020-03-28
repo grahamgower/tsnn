@@ -1,11 +1,11 @@
-CPPFLAGS=-Wall -O2 -g -I kastore/c -I tskit/c
+CPPFLAGS=-Wall -Wextra -O2 -g -I kastore/c -I tskit/c -DHAVE_PTHREAD
 TSK_OBJECTS=kastore.o tskit_tables.o tskit_core.o tskit_trees.o \
 	tskit_stats.o tskit_genotypes.o tskit_convert.o
 
 all: kastore tskit train
 
 train: train.o kann.o kautodiff.o libtskit.a
-	${CC} ${CPPFLAGS} $^ -o $@ $(LIBS) -lm
+	${CC} ${CPPFLAGS} $^ -o $@ $(LIBS) -lm -lpthread
 
 libtskit.a: ${TSK_OBJECTS}
 	${AR} rcs $@ ${TSK_OBJECTS} 
