@@ -121,7 +121,8 @@ tsdir_load(const char *dir, float **_genotypes, int *_n_files,
 		uint *_n_cols)
 {
 	tsk_table_collection_t tables;
-	char pat[strlen(dir)+3];
+#define PATTERN_SUFFIX "/*.trees"
+	char pat[strlen(dir) + strlen(PATTERN_SUFFIX) + 1];
 	glob_t pglob = {0,};
 	float *genotypes;
 	int ret;
@@ -134,7 +135,7 @@ tsdir_load(const char *dir, float **_genotypes, int *_n_files,
 	*_n_files = 0;
 	*_n_cols = 0;
 
-	sprintf(pat, "%s/*.trees", dir);
+	sprintf(pat, "%s%s", dir, PATTERN_SUFFIX);
 
 	switch (glob(pat, GLOB_NOSORT, _glob_err, &pglob)) {
 		case GLOB_NOSPACE:
@@ -289,8 +290,15 @@ prepare_data(float *gts_a, float *gts_b, int n_files_a, int n_files_b, int in_di
 	return 0;
 }
 
-// Same as kann_train_fnn1(), but print training info as tab-separated columns.
-int kann_train_tsnn1(kann_t *ann, float lr, int mini_size, int max_epoch, int max_drop_streak, float frac_val, int n, float **_x, float **_y)
+/*
+ * Copy/paste/modify of kann_train_fnn1().
+ *  - Print training info as tab-separated columns.
+ *  - Accept vector of learning rates, and use lr[i % lr_size] in epoch i.
+ */
+int kann_train_tsnn1(kann_t *ann,
+		float *lr, int lr_size,
+		int mini_size, int max_epoch, int max_drop_streak, float frac_val,
+		int n, float **_x, float **_y)
 {
 	int i, j, *shuf, n_train, n_val, n_in, n_out, n_var, n_const, drop_streak = 0, min_set = 0;
 	float **x, **y, *x1, *y1, *r, min_val_cost = FLT_MAX, *min_x, *min_c;
@@ -334,7 +342,7 @@ int kann_train_tsnn1(kann_t *ann, float lr, int mini_size, int max_epoch, int ma
 			train_cost += kann_cost(ann, 0, 1) * ms;
 			c = kann_class_error(ann, &b);
 			n_train_err += c, n_train_base += b;
-			kann_RMSprop(n_var, lr, 0, 0.9f, ann->g, ann->x, r);
+			kann_RMSprop(n_var, lr[i % lr_size], 0, 0.9f, ann->g, ann->x, r);
 			n_proc += ms;
 		}
 		train_cost /= n_train;
@@ -428,7 +436,8 @@ usage(const char *argv0)
 	fprintf(stderr, "  -d FLOAT   Dropout after conv and fc layers [0.2].\n");
 	//fprintf(stderr, "  -i FILE    Input model file [NULL]\n");
 	fprintf(stderr, "  -o FILE    Output model file [NULL]\n");
-	fprintf(stderr, "  -m INT     Max number of training epochs [NULL]\n");
+	//fprintf(stderr, "  -l FLOAT   Learning rate [0.01]\n");
+	fprintf(stderr, "  -m INT     Max number of training epochs [100]\n");
 	fprintf(stderr, "  -r INT     Row length (haplotype squashing) [128]\n");
 	fprintf(stderr, "  -s INT     Seed for random number generator [31415]\n");
 	fprintf(stderr, "  -t INT     Number of threads to use [1]\n");
@@ -463,12 +472,12 @@ main(int argc, char **argv)
 	// training params
 	int n_threads = 1;
 	int mini_size = 64;
-	int max_epoch = 20;
+	int max_epoch = 100;
 	int max_drop_streak = 10;
-	float lr = 0.001f;
+	float lr[] = {0.01f, 0.005f, 0.001f};  // sawtooth learning rate schedule
 	float frac_val = 0.1f;
 
-	while ((opt = getopt(argc, argv, "c:C:f:F:k:d:i:o:m:r:s:S:t:v")) != -1) {
+	while ((opt = getopt(argc, argv, "c:C:f:F:k:d:i:o:l:m:r:s:S:t:v")) != -1) {
 		switch(opt) {
 			case 'c':
 				n_conv2d = atoi(optarg);
@@ -495,6 +504,9 @@ main(int argc, char **argv)
 			case 'o':
 				fn_out = optarg;
 				break;
+			/*case 'l':
+				lr = atof(optarg);
+				break;*/
 			case 'm':
 				max_epoch = atoi(optarg);
 				break;
@@ -560,8 +572,9 @@ main(int argc, char **argv)
 	if (n_threads > 1)
 		kann_mt(ann, n_threads, mini_size);
 
-	kann_train_tsnn1(ann, lr, mini_size, max_epoch, max_drop_streak,
-			frac_val, n_files_a + n_files_b, x, y);
+	kann_train_tsnn1(ann, lr, sizeof(lr)/sizeof(lr[0]),
+			mini_size, max_epoch, max_drop_streak, frac_val,
+			n_files_a + n_files_b, x, y);
 
 	if (fn_out)
 		kann_save(fn_out, ann);
